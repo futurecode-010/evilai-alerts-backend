@@ -1,123 +1,80 @@
-/**
- * ALERT PARSER SERVICE
- * 
- * This parses incoming TradingView webhook messages and extracts
- * all the relevant data (price, targets, stats, etc.)
- * 
- * Expected format from your Pine Script:
- * "B↑ ENTRY | Price: 21500 | TP: 21560 | TP1: 21530 | SL: 21475 | WR: 62% | EV: 3.2 | R:R: 2.4 | n=15"
- */
+const SESSION_MAP = {
+  1: 'Asian (18:00-02:00)',
+  2: 'London (03:00-08:20)',
+  3: 'NY (08:20-13:30)',
+  4: 'Extended NY (08:20-17:00)',
+  5: 'Custom'
+};
 
-function parseAlert(rawMessage) {
-  // Handle different input types
-  let message;
-  if (typeof rawMessage === 'string') {
-    message = rawMessage;
-  } else if (typeof rawMessage === 'object') {
-    // If TradingView sends JSON, convert to string
-    message = JSON.stringify(rawMessage);
-  } else {
-    throw new Error('Invalid message format');
-  }
-  
-  console.log('📨 Parsing alert:', message);
-  
-  // Initialize result object with defaults
-  const parsed = {
-    raw: message,
-    signalType: null,      // 'B' or 'A'
-    direction: null,       // 'bullish' or 'bearish'
-    price: null,
-    target: null,
-    tp1: null,
-    stop: null,
-    winRate: null,
-    ev: null,
-    rr: null,
-    sampleSize: null,
-    timestamp: new Date().toISOString(),
-    isValid: false         // Will be true if we successfully parsed a signal
-  };
-  
-  // =====================================================
-  // STEP 1: Detect signal type and direction
-  // =====================================================
-  
-  if (message.includes('B↑') || message.includes('B Bull')) {
-    parsed.signalType = 'B';
-    parsed.direction = 'bullish';
-    parsed.isValid = true;
-  } else if (message.includes('B↓') || message.includes('B Bear')) {
-    parsed.signalType = 'B';
-    parsed.direction = 'bearish';
-    parsed.isValid = true;
-  } else if (message.includes('A↑') || message.includes('A Bull')) {
-    parsed.signalType = 'A';
-    parsed.direction = 'bullish';
-    parsed.isValid = true;
-  } else if (message.includes('A↓') || message.includes('A Bear')) {
-    parsed.signalType = 'A';
-    parsed.direction = 'bearish';
-    parsed.isValid = true;
-  }
-  
-  if (!parsed.isValid) {
-    console.log('⚠️ Could not detect signal type in message');
-    return parsed;
-  }
-  
-  // =====================================================
-  // STEP 2: Extract numeric values using regex patterns
-  // =====================================================
-  
-  // Helper function to extract a number after a label
-  const extractNumber = (pattern) => {
-    const match = message.match(pattern);
-    if (match && match[1]) {
-      return parseFloat(match[1]);
+const EM_MAP = {
+  1: 'GC Scalp',
+  2: 'GC Intraday',
+  3: 'GC Swing'
+};
+
+const formatTimeframe = (seconds) => {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}H`;
+  return `${Math.floor(seconds / 86400)}D`;
+};
+
+const parse = (data) => {
+  try {
+    const alert = typeof data === 'string' ? JSON.parse(data) : data;
+    
+    if (alert.signal && alert.action) {
+      const isA = alert.signal.startsWith('A_');
+      const isLong = alert.signal.endsWith('_LONG');
+      
+      return {
+        type: isA ? (isLong ? 'A↑' : 'A↓') : (isLong ? 'B↑' : 'B↓'),
+        setup: isA ? 'A' : 'B',
+        direction: isLong ? 'bullish' : 'bearish',
+        action: alert.action,
+        price: parseFloat(alert.price) || null,
+        target: parseFloat(alert.target) || null,
+        tp1: parseFloat(alert.tp1) || null,
+        stop: parseFloat(alert.stop) || null,
+        entry: parseFloat(alert.entry) || null,
+        exit: parseFloat(alert.exit) || null,
+        winRate: parseInt(alert.wr) || 0,
+        ev: parseFloat(alert.ev) || 0,
+        sampleSize: parseInt(alert.n) || 0,
+        session: SESSION_MAP[alert.session] || 'Unknown',
+        sessionId: parseInt(alert.session) || 0,
+        emMode: EM_MAP[alert.em] || 'Unknown',
+        emId: parseInt(alert.em) || 0,
+        timeframe: formatTimeframe(parseInt(alert.tf) || 0),
+        timeframeSecs: parseInt(alert.tf) || 0,
+        raw: alert
+      };
+    }
+    
+    if (alert.message) {
+      const regex = /^(A[↑↓]|B[↑↓])\s+ENTRY\s*\|\s*Price:\s*([\d.]+)\s*\|\s*TP:\s*([\d.]+)\s*\|\s*SL:\s*([\d.]+)\s*\|\s*WR:\s*(\d+)%?\s*\|\s*EV:\s*([\d.-]+)\s*\|\s*n=(\d+)/i;
+      const match = alert.message.match(regex);
+      if (match) {
+        return {
+          type: match[1],
+          setup: match[1].startsWith('A') ? 'A' : 'B',
+          direction: match[1].includes('↑') ? 'bullish' : 'bearish',
+          action: 'ENTRY',
+          price: parseFloat(match[2]),
+          target: parseFloat(match[3]),
+          stop: parseFloat(match[4]),
+          winRate: parseInt(match[5]),
+          ev: parseFloat(match[6]),
+          sampleSize: parseInt(match[7]),
+          raw: alert
+        };
+      }
     }
     return null;
-  };
-  
-  // Price: looks for "Price: 21500" or "Price:21500"
-  parsed.price = extractNumber(/Price:\s*([\d.]+)/i);
-  
-  // Target (TP/Target): looks for "TP: 21560" or "Target: 21560"
-  parsed.target = extractNumber(/(?:TP|Target):\s*([\d.]+)/i);
-  
-  // TP1 (50% target): looks for "TP1: 21530"
-  parsed.tp1 = extractNumber(/TP1:\s*([\d.]+)/i);
-  
-  // Stop Loss: looks for "SL: 21475" or "Stop: 21475"
-  parsed.stop = extractNumber(/(?:SL|Stop):\s*([\d.]+)/i);
-  
-  // Win Rate: looks for "WR: 62%" or "WR: 62"
-  parsed.winRate = extractNumber(/WR:\s*([\d.]+)%?/i);
-  
-  // Expected Value: looks for "EV: 3.2" or "EV: -1.5"
-  parsed.ev = extractNumber(/EV:\s*([-\d.]+)/i);
-  
-  // Risk/Reward: looks for "R:R: 2.4" or "RR: 2.4"
-  parsed.rr = extractNumber(/R:?R:\s*([\d.]+)/i);
-  
-  // Sample Size: looks for "n=15" or "n: 15"
-  parsed.sampleSize = extractNumber(/n[=:]\s*(\d+)/i);
-  
-  // =====================================================
-  // STEP 3: Log what we found
-  // =====================================================
-  
-  console.log('✅ Parsed alert:', {
-    type: `${parsed.signalType}${parsed.direction === 'bullish' ? '↑' : '↓'}`,
-    price: parsed.price,
-    tp1: parsed.tp1,
-    stop: parsed.stop,
-    winRate: parsed.winRate ? `${parsed.winRate}%` : null,
-    ev: parsed.ev,
-    sampleSize: parsed.sampleSize
-  });
-  
-  return parsed;
-}
+  } catch (error) {
+    console.error('Parse error:', error);
+    return null;
+  }
+};
 
-module.exports = { parseAlert };
+module.exports = { parse, SESSION_MAP, EM_MAP, formatTimeframe };

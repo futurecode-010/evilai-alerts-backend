@@ -1,69 +1,76 @@
 const express = require('express');
-const pool = require('../config/database');
-const { parseAlert } = require('../services/alertParser');
-const { shouldNotifyUser } = require('../services/filterService');
-const { sendPushNotification } = require('../services/notificationService');
-
 const router = express.Router();
+const pool = require('../config/database');
+const alertParser = require('../services/alertParser');
+const filterService = require('../services/filterService');
+const notificationService = require('../services/notificationService');
 
-// POST /webhook/tradingview
+/**
+ * POST /webhook/tradingview
+ * Receives alerts from TradingView and forwards to users
+ */
 router.post('/tradingview', async (req, res) => {
   try {
     console.log('\n' + '='.repeat(60));
     console.log('INCOMING WEBHOOK');
     console.log('='.repeat(60));
     
-    const alert = parseAlert(req.body);
+    // Parse the incoming alert
+    const rawMessage = req.body.message || req.body.text || JSON.stringify(req.body);
+    console.log(`📨 Parsing alert: ${JSON.stringify(req.body)}`);
     
-    if (!alert.isValid) {
-      console.log('Could not parse alert, ignoring');
-      return res.status(200).send('OK - Invalid alert format');
-    }
-    
+    const alert = alertParser.parse(rawMessage);
+    console.log('✅ Parsed alert:', alert);
+
+    // Get all active users with their filter settings
     const usersResult = await pool.query(`
-      SELECT u.id, u.email, u.fcm_token, f.enable_b_bullish, f.enable_b_bearish, f.enable_a_bullish, f.enable_a_bearish, f.min_win_rate, f.min_ev, f.min_sample_size, f.filter_mode
-      FROM users u
-      JOIN user_filters f ON u.id = f.user_id
-      WHERE u.is_active = true
+      SELECT id, email, fcm_token, web_push_subscription, 
+             min_win_rate, min_ev, min_sample_size 
+      FROM users 
+      WHERE is_active = true
     `);
-    
+
     const users = usersResult.rows;
-    console.log('Found ' + users.length + ' active users');
-    
+    console.log(`Found ${users.length} active users`);
+
     let sentCount = 0;
     let skippedCount = 0;
-    
+
+    // Process each user
     for (const user of users) {
-      const filterResult = shouldNotifyUser(user, alert);
-      
-      if (filterResult.notify) {
-        const sendResult = await sendPushNotification(user, alert);
-        if (sendResult.success) {
-          sentCount++;
-        }
-      } else {
+      // Check if alert passes user's filters
+      if (!filterService.passesFilters(alert, user)) {
+        console.log(`User ${user.id} filtered out (doesn't meet criteria)`);
         skippedCount++;
-        console.log('Skipped user ' + user.id + ': ' + filterResult.reason);
+        continue;
+      }
+
+      // Check if user has any notification method
+      if (!user.fcm_token && !user.web_push_subscription) {
+        console.log(`User ${user.id} has no notification method, skipping`);
+        continue;
+      }
+
+      // Send notification
+      try {
+        const result = await notificationService.sendToUser(user, alert);
+        if (result.fcm || result.webpush) {
+          sentCount++;
+          console.log(`✅ Notification sent to user ${user.id}`);
+        }
+      } catch (error) {
+        console.error(`Failed to notify user ${user.id}:`, error.message);
       }
     }
-    
-    console.log('\nSUMMARY: Sent to ' + sentCount + ' users, skipped ' + skippedCount);
+
+    console.log(`\nSUMMARY: Sent to ${sentCount} users, skipped ${skippedCount}`);
     console.log('='.repeat(60) + '\n');
-    
+
     res.status(200).send('OK');
   } catch (error) {
     console.error('Webhook error:', error);
-    res.status(500).send('Error processing webhook');
+    res.status(500).json({ error: 'Failed to process webhook' });
   }
-});
-
-// GET /webhook/test
-router.get('/test', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'Webhook endpoint is working', 
-    timestamp: new Date().toISOString() 
-  });
 });
 
 module.exports = router;

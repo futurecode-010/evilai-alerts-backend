@@ -1,23 +1,15 @@
 /**
  * SERVER ENTRY POINT
- * 
- * This starts the Express server.
  */
 
-// Load environment variables FIRST (before anything else)
 require('dotenv').config();
 
-// Import the app
 const app = require('./src/app');
-
-// Import database to test connection on startup
 require('./src/config/database');
 
-// Get port from environment or default to 3000
 const PORT = process.env.PORT || 3000;
 
-// Start the server
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log('\n' + '='.repeat(50));
   console.log('🚀 EvilAI Alert Server Started');
   console.log('='.repeat(50));
@@ -25,4 +17,13 @@ app.listen(PORT, () => {
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`⏰ Started at: ${new Date().toISOString()}`);
   console.log('='.repeat(50) + '\n');
+});
+
+// Keep the server running
+server.on('error', (err) => {
+  console.error('Server error:', err);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
 });
