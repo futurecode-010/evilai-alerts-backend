@@ -105,7 +105,7 @@ class NotificationService {
    * Format notification title
    */
   formatTitle(alert) {
-    const direction = alert.type?.includes('B') ? '🟢 LONG' : '🔴 SHORT';
+    const isLong = alert.signal?.includes('LONG') || alert.type?.includes('↑'); const direction = isLong ? '🟢 LONG' : '🔴 SHORT';
     return `${direction} Signal`;
   }
 
