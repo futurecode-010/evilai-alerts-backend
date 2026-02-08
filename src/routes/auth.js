@@ -1,9 +1,3 @@
-/**
- * AUTHENTICATION ROUTES
- * 
- * Handles user registration and login.
- */
-
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -11,157 +5,168 @@ const pool = require('../config/database');
 
 const router = express.Router();
 
-// =====================================================
-// POST /auth/register
-// Creates a new user account
-// =====================================================
+// Discord OAuth Config
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
+const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || 'https://evilai-alerts-production.up.railway.app/auth/discord/callback';
+const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
+const DISCORD_PREMIUM_ROLE_ID = process.env.DISCORD_PREMIUM_ROLE_ID;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://evilai-signal-app.vercel.app';
 
-router.post('/register', async (req, res) => {
+// =====================================================
+// GET /auth/discord
+// Redirects user to Discord OAuth
+// =====================================================
+router.get('/discord', (req, res) => {
+  const params = new URLSearchParams({
+    client_id: DISCORD_CLIENT_ID,
+    redirect_uri: DISCORD_REDIRECT_URI,
+    response_type: 'code',
+    scope: 'identify guilds.members.read',
+  });
+  res.redirect(`https://discord.com/api/oauth2/authorize?${params}`);
+});
+
+// =====================================================
+// GET /auth/discord/callback
+// Handles Discord OAuth callback
+// =====================================================
+router.get('/discord/callback', async (req, res) => {
+  const { code, error } = req.query;
+
+  if (error || !code) {
+    console.error('Discord OAuth error:', error);
+    return res.redirect(`${FRONTEND_URL}/login?error=discord_denied`);
+  }
+
   try {
-    const { email, password } = req.body;
-    
-    // Validate input
-    if (!email || !password) {
-      return res.status(400).json({ 
-        error: 'Missing fields',
-        message: 'Email and password are required' 
-      });
-    }
-    
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ 
-        error: 'Invalid email',
-        message: 'Please enter a valid email address' 
-      });
-    }
-    
-    // Validate password strength
-    if (password.length < 8) {
-      return res.status(400).json({ 
-        error: 'Weak password',
-        message: 'Password must be at least 8 characters' 
-      });
-    }
-    
-    // Check if email already exists
-    const existingUser = await pool.query(
-      'SELECT id FROM users WHERE email = $1',
-      [email.toLowerCase()]
-    );
-    
-    if (existingUser.rows.length > 0) {
-      return res.status(409).json({ 
-        error: 'Email exists',
-        message: 'An account with this email already exists' 
-      });
-    }
-    
-    // Hash the password (bcrypt automatically adds salt)
-    const saltRounds = 10;
-    const passwordHash = await bcrypt.hash(password, saltRounds);
-    
-    // Create the user
-    const result = await pool.query(
-      `INSERT INTO users (email, password_hash) 
-       VALUES ($1, $2) 
-       RETURNING id, email, created_at`,
-      [email.toLowerCase(), passwordHash]
-    );
-    
-    const newUser = result.rows[0];
-    console.log(`✅ New user registered: ${newUser.email} (ID: ${newUser.id})`);
-    
-    // Return success (don't auto-login, make them log in)
-    res.status(201).json({
-      message: 'Account created successfully',
-      user: {
-        id: newUser.id,
-        email: newUser.email
-      }
+    // Exchange code for access token
+    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: DISCORD_REDIRECT_URI,
+      }),
     });
+
+    const tokenData = await tokenResponse.json();
     
+    if (!tokenData.access_token) {
+      console.error('Discord token error:', tokenData);
+      return res.redirect(`${FRONTEND_URL}/login?error=token_failed`);
+    }
+
+    // Get user info from Discord
+    const userResponse = await fetch('https://discord.com/api/users/@me', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const discordUser = await userResponse.json();
+
+    console.log(`Discord user: ${discordUser.username} (${discordUser.id})`);
+
+    // Check if user has Premium role in the guild
+    const memberResponse = await fetch(
+      `https://discord.com/api/users/@me/guilds/${DISCORD_GUILD_ID}/member`,
+      { headers: { Authorization: `Bearer ${tokenData.access_token}` } }
+    );
+
+    if (!memberResponse.ok) {
+      console.log(`User ${discordUser.username} is not in the server`);
+      return res.redirect(`${FRONTEND_URL}/login?error=not_in_server`);
+    }
+
+    const memberData = await memberResponse.json();
+    const hasPremium = memberData.roles && memberData.roles.includes(DISCORD_PREMIUM_ROLE_ID);
+
+    if (!hasPremium) {
+      console.log(`User ${discordUser.username} does not have Premium role`);
+      return res.redirect(`${FRONTEND_URL}/login?error=no_premium`);
+    }
+
+    console.log(`✅ User ${discordUser.username} has Premium role`);
+
+    // Find or create user in database
+    let user;
+    const existingUser = await pool.query(
+      'SELECT * FROM users WHERE discord_id = $1',
+      [discordUser.id]
+    );
+
+    if (existingUser.rows.length > 0) {
+      // Update existing user
+      user = existingUser.rows[0];
+      await pool.query(
+        `UPDATE users SET 
+          discord_username = $1, 
+          discord_avatar = $2,
+          discord_access_token = $3,
+          updated_at = CURRENT_TIMESTAMP 
+        WHERE discord_id = $4`,
+        [discordUser.username, discordUser.avatar, tokenData.access_token, discordUser.id]
+      );
+      console.log(`✅ Updated user: ${discordUser.username}`);
+    } else {
+      // Create new user
+      const result = await pool.query(
+        `INSERT INTO users (discord_id, discord_username, discord_avatar, discord_access_token, email, is_active)
+         VALUES ($1, $2, $3, $4, $5, true)
+         RETURNING *`,
+        [
+          discordUser.id,
+          discordUser.username,
+          discordUser.avatar,
+          tokenData.access_token,
+          discordUser.email || `${discordUser.id}@discord.user`
+        ]
+      );
+      user = result.rows[0];
+      console.log(`✅ Created new user: ${discordUser.username}`);
+    }
+
+    // Generate JWT token
+    const jwtToken = jwt.sign(
+      { userId: user.id, discordId: discordUser.id, username: discordUser.username },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Store active token for single-session enforcement
+    await pool.query(
+      'UPDATE users SET active_token = $1 WHERE id = $2',
+      [jwtToken, user.id]
+    );
+
+    // Redirect to frontend with token
+    res.redirect(`${FRONTEND_URL}/auth/callback?token=${jwtToken}`);
+
   } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({ error: 'Server error during registration' });
+    console.error('Discord OAuth error:', error);
+    res.redirect(`${FRONTEND_URL}/login?error=server_error`);
   }
 });
 
 // =====================================================
-// POST /auth/login
-// Authenticates user and returns JWT token
+// POST /auth/register (kept for backwards compatibility)
 // =====================================================
+router.post('/register', async (req, res) => {
+  res.status(403).json({ 
+    error: 'Registration disabled',
+    message: 'Please use Discord login to access the app' 
+  });
+});
 
+// =====================================================
+// POST /auth/login (kept for backwards compatibility)
+// =====================================================
 router.post('/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    // Validate input
-    if (!email || !password) {
-      return res.status(400).json({ 
-        error: 'Missing fields',
-        message: 'Email and password are required' 
-      });
-    }
-    
-    // Find user by email
-    const result = await pool.query(
-      'SELECT id, email, password_hash, is_active, subscription_tier FROM users WHERE email = $1',
-      [email.toLowerCase()]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(401).json({ 
-        error: 'Invalid credentials',
-        message: 'Email or password is incorrect' 
-      });
-    }
-    
-    const user = result.rows[0];
-    
-    // Check if account is active
-    if (!user.is_active) {
-      return res.status(401).json({ 
-        error: 'Account disabled',
-        message: 'Your account has been disabled' 
-      });
-    }
-    
-    // Verify password
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    
-    if (!validPassword) {
-      return res.status(401).json({ 
-        error: 'Invalid credentials',
-        message: 'Email or password is incorrect' 
-      });
-    }
-    
-    // Create JWT token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-    );
-    
-    console.log(`✅ User logged in: ${user.email} (ID: ${user.id})`);
-    
-    // Return token and user info
-    res.json({
-      message: 'Login successful',
-      token: token,
-      user: {
-        id: user.id,
-        email: user.email,
-        subscription_tier: user.subscription_tier
-      }
-    });
-    
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: 'Server error during login' });
-  }
+  res.status(403).json({ 
+    error: 'Login method disabled',
+    message: 'Please use Discord login to access the app' 
+  });
 });
 
 module.exports = router;
