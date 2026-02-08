@@ -142,3 +142,17 @@ router.get('/vapid-key', (req, res) => {
 });
 
 module.exports = router;
+
+// DEBUG - check user filters in DB
+router.get('/debug-filters', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, email, min_win_rate, min_ev, min_sample_size FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    console.log('DEBUG filters:', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
